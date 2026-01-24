@@ -25,7 +25,7 @@ from fastvideo.distributed.communication_op import (
 from fastvideo.configs.models.dits import HunyuanVideo15Config
 from fastvideo.layers.layernorm import (LayerNormScaleShift, ScaleResidual,
                                         ScaleResidualLayerNormScaleShift)
-from fastvideo.layers.linear import ReplicatedLinear
+from fastvideo.layers.linear import ColumnParallelLinear, ReplicatedLinear, RowParallelLinear
 # TODO(will-PY-refactor): RMSNorm ....
 from fastvideo.layers.mlp import MLP
 from fastvideo.layers.rotary_embedding import get_rotary_pos_embed
@@ -238,7 +238,8 @@ class MMDoubleStreamBlock(nn.Module):
                            mlp_hidden_dim,
                            bias=True,
                            dtype=dtype,
-                           prefix=f"{prefix}.img_mlp")
+                           prefix=f"{prefix}.img_mlp",
+                           use_tp=True)
 
         # Text modulation components
         self.txt_mod = ModulateProjection(

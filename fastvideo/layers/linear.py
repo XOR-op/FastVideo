@@ -377,8 +377,8 @@ class ColumnParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter,
-                      loaded_weight: torch.Tensor) -> None:
+    def process_loaded_weight(self, param: Parameter,
+                              loaded_weight: torch.Tensor) -> torch.Tensor:
         tp_rank = get_tp_rank()
         output_dim = getattr(param, "output_dim", None)
 
@@ -398,7 +398,12 @@ class ColumnParallelLinear(LinearBase):
             loaded_weight = loaded_weight.reshape(1)
 
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        return loaded_weight
+
+    def weight_loader(self, param: Parameter,
+                      loaded_weight: torch.Tensor) -> None:
+        loaded_weight = self.process_loaded_weight(param, loaded_weight)
+        param.data.copy_(loaded_weight)
 
     def weight_loader_v2(self, param: Parameter,
                          loaded_weight: torch.Tensor) -> None:
@@ -988,7 +993,8 @@ class RowParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def process_loaded_weight(self, param: Parameter,
+                              loaded_weight: torch.Tensor) -> torch.Tensor:
         tp_rank = get_tp_rank()
         input_dim = getattr(param, "input_dim", None)
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
@@ -1009,7 +1015,11 @@ class RowParallelLinear(LinearBase):
             loaded_weight = loaded_weight.reshape(1)
 
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        return loaded_weight
+
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        loaded_weight = self.process_loaded_weight(param, loaded_weight)
+        param.data.copy_(loaded_weight)
 
     def weight_loader_v2(self, param: BasevLLMParameter,
                          loaded_weight: torch.Tensor):
