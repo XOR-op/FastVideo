@@ -804,12 +804,14 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_size=shard_size,
         )
 
-    def weight_loader(
+    def process_loaded_weight(
         self,
         param: Parameter,
         loaded_weight: torch.Tensor,
         loaded_shard_id: str | None = None,
-    ):
+        expand_outputs:
+        bool = False,  # expand_outputs should only be used by weight_loader()
+    ) -> torch.Tensor | list[tuple[torch.Tensor, torch.Tensor]]:
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         # Special case for AQLM codebooks.
@@ -827,8 +829,10 @@ class QKVParallelLinear(ColumnParallelLinear):
                         param_data, loaded_weight, 0)
 
                 assert param_data.shape == loaded_weight.shape
-                param_data.copy_(loaded_weight)
-                return
+                if expand_outputs:
+                    return [(param_data, loaded_weight)]
+                else:
+                    return loaded_weight
             shard_offsets = [
                 # (shard_id, shard_offset, shard_size)
                 ("q", 0, self.total_num_heads * self.head_size),
@@ -845,11 +849,22 @@ class QKVParallelLinear(ColumnParallelLinear):
                 ),
             ]
 
+            results: list[tuple[torch.Tensor, torch.Tensor]] = []
             for shard_id, shard_offset, shard_size in shard_offsets:
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
-                self.weight_loader(param, loaded_weight_shard, shard_id)
-            return
+                results.extend(
+                    self.process_loaded_weight(
+                        param,
+                        loaded_weight_shard,
+                        shard_id,
+                        expand_outputs=True,
+                    ))
+            if expand_outputs:
+                return results
+            else:
+                return torch.cat(
+                    [loaded_weight for _, loaded_weight in results], dim=0)
 
         tp_rank = get_tp_rank()
         assert loaded_shard_id in ["q", "k", "v"]
@@ -904,7 +919,23 @@ class QKVParallelLinear(ColumnParallelLinear):
                     "for all partitions.")
 
         assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
+        if expand_outputs:
+            return [(param_data, loaded_weight)]
+        else:
+            return loaded_weight
+
+    def weight_loader(
+        self,
+        param: Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: str | None = None,
+    ):
+        results = self.process_loaded_weight(param,
+                                             loaded_weight,
+                                             loaded_shard_id,
+                                             expand_outputs=True)
+        for param_data, loaded_weight in results:
+            param_data.copy_(loaded_weight)
 
 
 class RowParallelLinear(LinearBase):

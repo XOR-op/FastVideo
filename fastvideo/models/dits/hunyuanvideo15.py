@@ -25,7 +25,7 @@ from fastvideo.distributed.communication_op import (
 from fastvideo.configs.models.dits import HunyuanVideo15Config
 from fastvideo.layers.layernorm import (LayerNormScaleShift, ScaleResidual,
                                         ScaleResidualLayerNormScaleShift)
-from fastvideo.layers.linear import ColumnParallelLinear, ReplicatedLinear, RowParallelLinear
+from fastvideo.layers.linear import ColumnParallelLinear, QKVParallelLinear, ReplicatedLinear, RowParallelLinear
 # TODO(will-PY-refactor): RMSNorm ....
 from fastvideo.layers.mlp import MLP
 from fastvideo.layers.rotary_embedding import get_rotary_pos_embed
@@ -37,7 +37,7 @@ from fastvideo.logger import init_logger
 from fastvideo.forward_context import set_forward_context
 from fastvideo.attention.backends.abstract import AttentionMetadata
 
-from fastvideo.distributed.parallel_state import get_sp_world_size
+from fastvideo.distributed.parallel_state import get_sp_world_size, get_tp_world_size
 from fastvideo.distributed.utils import create_attention_mask_for_padding
 
 logger = init_logger(__name__)
@@ -70,7 +70,7 @@ class HunyuanRMSNorm(nn.Module):
         if elementwise_affine:
             self.weight = nn.Parameter(torch.ones(dim, **factory_kwargs))
 
-    def _norm(self, x) -> torch.Tensor:
+    def _norm(self, x: torch.Tensor) -> torch.Tensor:
         """
         Apply the RMSNorm normalization to the input tensor.
 
@@ -83,7 +83,7 @@ class HunyuanRMSNorm(nn.Module):
         """
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through the RMSNorm layer.
 
@@ -192,6 +192,8 @@ class MMDoubleStreamBlock(nn.Module):
     ):
         super().__init__()
 
+        self.tp_size = get_tp_world_size()
+
         self.deterministic = False
         self.num_attention_heads = num_attention_heads
         head_dim = hidden_size // num_attention_heads
@@ -219,16 +221,25 @@ class MMDoubleStreamBlock(nn.Module):
         self.img_mlp_residual = ScaleResidual()
 
         # Image attention components
-        self.img_attn_qkv = ReplicatedLinear(hidden_size,
-                                             hidden_size * 3,
-                                             bias=True,
-                                             params_dtype=dtype,
-                                             prefix=f"{prefix}.img_attn_qkv")
+        # self.img_attn_qkv = ReplicatedLinear(hidden_size,
+        #                                      hidden_size * 3,
+        #                                      bias=True,
+        #                                      params_dtype=dtype,
+        #                                      prefix=f"{prefix}.img_attn_qkv")
+        self.img_attn_qkv = QKVParallelLinear(
+            hidden_size=hidden_size,
+            head_size=head_dim,
+            total_num_heads=num_attention_heads,
+            bias=True,
+            params_dtype=dtype,
+            prefix=f"{prefix}.img_attn_qkv",
+        )
 
         self.img_attn_q_norm = HunyuanRMSNorm(head_dim, eps=1e-6, dtype=dtype)
         self.img_attn_k_norm = HunyuanRMSNorm(head_dim, eps=1e-6, dtype=dtype)
 
-        self.img_attn_proj = ReplicatedLinear(hidden_size,
+        self.img_attn_proj = RowParallelLinear(hidden_size,
+        # self.img_attn_proj = ReplicatedLinear(hidden_size,
                                               hidden_size,
                                               bias=True,
                                               params_dtype=dtype,
@@ -263,16 +274,24 @@ class MMDoubleStreamBlock(nn.Module):
         self.txt_mlp_residual = ScaleResidual()
 
         # Text attention components
-        self.txt_attn_qkv = ReplicatedLinear(hidden_size,
-                                             hidden_size * 3,
-                                             bias=True,
-                                             params_dtype=dtype)
+        # self.txt_attn_qkv = ReplicatedLinear(hidden_size,
+        #                                      hidden_size * 3,
+        #                                      bias=True,
+        #                                      params_dtype=dtype)
+        self.txt_attn_qkv = QKVParallelLinear(
+            hidden_size=hidden_size,
+            head_size=head_dim,
+            total_num_heads=num_attention_heads,
+            bias=True,
+            params_dtype=dtype,
+        )
 
         # QK norm layers for text
         self.txt_attn_q_norm = HunyuanRMSNorm(head_dim, eps=1e-6, dtype=dtype)
         self.txt_attn_k_norm = HunyuanRMSNorm(head_dim, eps=1e-6, dtype=dtype)
 
-        self.txt_attn_proj = ReplicatedLinear(hidden_size,
+        self.txt_attn_proj = RowParallelLinear(hidden_size,
+        # self.txt_attn_proj = ReplicatedLinear(hidden_size,
                                               hidden_size,
                                               bias=True,
                                               params_dtype=dtype)
@@ -325,7 +344,7 @@ class MMDoubleStreamBlock(nn.Module):
 
         # Split QKV
         img_qkv = img_qkv.view(batch_size, image_seq_len, 3,
-                               self.num_attention_heads, -1)
+                               self.num_attention_heads // self.tp_size, -1)
         img_q, img_k, img_v = img_qkv[:, :, 0], img_qkv[:, :, 1], img_qkv[:, :,
                                                                           2]
 
@@ -342,7 +361,7 @@ class MMDoubleStreamBlock(nn.Module):
 
         # Split QKV
         txt_qkv = txt_qkv.view(batch_size, text_seq_len, 3,
-                               self.num_attention_heads, -1)
+                               self.num_attention_heads // self.tp_size, -1)
         txt_q, txt_k, txt_v = txt_qkv[:, :, 0], txt_qkv[:, :, 1], txt_qkv[:, :,
                                                                           2]
         # Apply QK-Norm if needed
