@@ -650,11 +650,20 @@ class WorkerMultiprocProc:
                         logging_info = None
                         if envs.FASTVIDEO_STAGE_LOGGING:
                             logging_info = output_batch.logging_info
+                        time_start = time.perf_counter()
+                        result = output_batch.output.cpu()
+                        time_end = time.perf_counter()
+                        logger.info("!!! Transfer to CPU completed in %.2f seconds", time_end - time_start)
+                        shape = result.shape
+                        logger.info("!!! Output shape: %s", str(shape))
+                        time_start = time.perf_counter()
                         self.pipe.send({
-                            "output_batch": output_batch.output.cpu(),
+                            "output_batch": result,
                             "logging_info": logging_info,
                             "extra": output_batch.extra,
                         })
+                        time_end = time.perf_counter()
+                        logger.info("!!! Send output completed in %.2f seconds", time_end - time_start)
                     else:
                         result = self.worker.execute_method(
                             method, *args, **kwargs)

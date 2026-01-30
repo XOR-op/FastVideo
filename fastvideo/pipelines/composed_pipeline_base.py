@@ -423,8 +423,14 @@ class ComposedPipelineBase(ABC):
         logger.info("Running pipeline stages: %s",
                     self._stage_name_mapping.keys())
         # logger.info("Batch: %s", batch)
+        import time
+        logger.info("!!! Starting full pipeline execution...")
+        time_start = time.perf_counter()
         for stage in self.stages:
             batch = stage(batch, fastvideo_args)
+        time_end = time.perf_counter()
+        logger.info("!!! Full pipeline execution completed in %.2f seconds", 
+                    time_end - time_start)
 
         # Return the output
         return batch

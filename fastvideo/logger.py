@@ -27,9 +27,9 @@ RESET = '\033[0;0m'
 _warned_local_main_process = False
 _warned_main_process = False
 
-_FORMAT = (f"{FASTVIDEO_LOGGING_PREFIX}%(levelname)s %(asctime)s "
+_FORMAT = (f"{FASTVIDEO_LOGGING_PREFIX}%(levelname)s %(asctime)s%(msecs)03d "
            "[%(filename)s:%(lineno)d] %(message)s")
-_DATE_FORMAT = "%m-%d %H:%M:%S"
+_DATE_FORMAT = "%m-%d %H:%M:%S."
 
 DEFAULT_LOGGING_CONFIG = {
     "formatters": {
