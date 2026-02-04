@@ -651,7 +651,8 @@ class WorkerMultiprocProc:
                         if envs.FASTVIDEO_STAGE_LOGGING:
                             logging_info = output_batch.logging_info
                         time_start = time.perf_counter()
-                        result = output_batch.output.cpu()
+                        # result tensor shared by CUDA IPC to avoid serialization overhead
+                        result = output_batch.output
                         time_end = time.perf_counter()
                         logger.info("!!! Transfer to CPU completed in %.2f seconds", time_end - time_start)
                         shape = result.shape
