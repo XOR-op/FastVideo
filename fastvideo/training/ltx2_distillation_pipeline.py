@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 import sys
 from copy import deepcopy
+from typing import cast
+
+import torch
 
 from fastvideo.fastvideo_args import FastVideoArgs, TrainingArgs
 from fastvideo.logger import init_logger
 from fastvideo.pipelines.basic.ltx2.ltx2_dmd_pipeline import LTX2DMDPipeline
 from fastvideo.training.distillation_pipeline import DistillationPipeline
+from fastvideo.training.training_pipeline import TrainingPipeline
 from fastvideo.utils import is_vsa_available
 
 vsa_available = is_vsa_available()
@@ -17,7 +21,6 @@ class LTX2DistillationPipeline(DistillationPipeline):
     """DMD distillation pipeline for LTX-2 using precomputed LTX-2 data."""
 
     _required_config_modules = [
-        "scheduler",
         "transformer",
         "vae",
         "audio_vae",
@@ -25,6 +28,10 @@ class LTX2DistillationPipeline(DistillationPipeline):
     ]
 
     with_audio: bool = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.modules["scheduler"] = None
 
     def initialize_pipeline(self, fastvideo_args: FastVideoArgs):
         # self.modules["scheduler"] = FlowMatchEulerDiscreteScheduler(
@@ -36,6 +43,51 @@ class LTX2DistillationPipeline(DistillationPipeline):
         May be used in future refactors.
         """
         pass
+
+    def load_modules(
+        self,
+        fastvideo_args: FastVideoArgs,
+        loaded_modules: dict[str, torch.nn.Module] | None = None,
+    ):
+        # bypass DistillationPipeline's load_modules()
+        modules = TrainingPipeline.load_modules(self, fastvideo_args,
+                                                loaded_modules)
+        training_args = cast(TrainingArgs, fastvideo_args)
+
+        if training_args.real_score_model_path:
+            logger.info(
+                "Loading real score transformer from: %s",
+                training_args.real_score_model_path,
+            )
+            # TODO(will): can use deepcopy instead if the model is the same
+            self.real_score_transformer = self.load_module_from_path(
+                training_args.real_score_model_path,
+                "transformer",
+                training_args,
+            )
+            modules["real_score_transformer"] = self.real_score_transformer
+        else:
+            raise ValueError(
+                "real_score_model_path is required for DMD distillation pipeline"
+            )
+
+        if training_args.fake_score_model_path:
+            logger.info(
+                "Loading fake score transformer from: %s",
+                training_args.fake_score_model_path,
+            )
+            self.fake_score_transformer = self.load_module_from_path(
+                training_args.fake_score_model_path,
+                "transformer",
+                training_args,
+            )
+            modules["fake_score_transformer"] = self.fake_score_transformer
+        else:
+            raise ValueError(
+                "fake_score_model_path is required for DMD distillation pipeline"
+            )
+
+        return modules
 
     def initialize_validation_pipeline(self, training_args: TrainingArgs):
         logger.info("Initializing validation pipeline...")
@@ -51,7 +103,8 @@ class LTX2DistillationPipeline(DistillationPipeline):
             sp_size=training_args.sp_size,
             num_gpus=training_args.num_gpus,
             pin_cpu_memory=training_args.pin_cpu_memory,
-            dit_cpu_offload=True)
+            dit_cpu_offload=True,
+        )
 
         self.validation_pipeline = validation_pipeline
 

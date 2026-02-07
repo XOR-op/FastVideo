@@ -34,7 +34,7 @@ export NODE_RANK=$SLURM_PROCID
 # nodes=( $(scontrol show hostnames $SLURM_JOB_NODELIST) )
 # export MASTER_ADDR=${nodes[0]}
 export MASTER_ADDR=$(hostname)
-export CUDA_VISIBLE_DEVICES=$SLURM_LOCALID
+# export CUDA_VISIBLE_DEVICES=$SLURM_LOCALID
 export TOKENIZERS_PARALLELISM=false
 # export WANDB_BASE_URL="https://api.wandb.ai"
 # export WANDB_MODE="online"
@@ -47,7 +47,7 @@ echo "MASTER_ADDR: $MASTER_ADDR"
 echo "NODE_RANK: $NODE_RANK"
 
 # Configs
-NUM_GPUS=4
+NUM_GPUS=2
 MODEL_PATH="Davids048/LTX2-Base-Diffusers"
 REAL_SCORE_MODEL_PATH="Davids048/LTX2-Base-Diffusers"
 FAKE_SCORE_MODEL_PATH="Davids048/LTX2-Base-Diffusers"
@@ -76,11 +76,11 @@ training_args=(
 
 # Parallel arguments
 parallel_args=(
-  --num_gpus 2
+  --num_gpus $NUM_GPUS
   --sp_size 1
   --tp_size 1
-  --hsdp_replicate_dim 2
-  --hsdp_shard_dim 1
+  --hsdp_replicate_dim 1
+  --hsdp_shard_dim $NUM_GPUS
 )
 
 # Model arguments
@@ -94,7 +94,7 @@ model_args=(
 # Dataset arguments
 dataset_args=(
   --data_path "$DATA_DIR"
-  --dataloader_num_workers 4
+  --dataloader_num_workers 2
 )
 
 # Validation arguments
@@ -144,21 +144,13 @@ dmd_args=(
 )
 
 # srun torchrun \
-# --nnodes $SLURM_JOB_NUM_NODES \
-# --nproc_per_node $NUM_GPUS \
-# --node_rank $SLURM_PROCID \
-# --rdzv_backend=c10d \
-# --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
-#     fastvideo/training/ltx2_distillation_pipeline.py \
-#     "${parallel_args[@]}" \
-#     "${model_args[@]}" \
-#     "${dataset_args[@]}" \
-#     "${training_args[@]}" \
-#     "${optimizer_args[@]}" \
-#     "${validation_args[@]}" \
-#     "${miscellaneous_args[@]}" \
-#     "${dmd_args[@]}"
-python3 fastvideo/training/ltx2_distillation_pipeline.py \
+torchrun \
+--nnodes $SLURM_JOB_NUM_NODES \
+--nproc_per_node $NUM_GPUS \
+--node_rank $SLURM_PROCID \
+--rdzv_backend=c10d \
+--rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
+    fastvideo/training/ltx2_distillation_pipeline.py \
     "${parallel_args[@]}" \
     "${model_args[@]}" \
     "${dataset_args[@]}" \
