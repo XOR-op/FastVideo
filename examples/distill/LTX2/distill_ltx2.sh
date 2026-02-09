@@ -51,7 +51,7 @@ NUM_GPUS=2
 MODEL_PATH="Davids048/LTX2-Base-Diffusers"
 REAL_SCORE_MODEL_PATH="Davids048/LTX2-Base-Diffusers"
 FAKE_SCORE_MODEL_PATH="Davids048/LTX2-Base-Diffusers"
-DATA_DIR=data/ltx2-data
+DATA_DIR=data/test-text-preprocessing/single_node/
 VALIDATION_DIR=your_validation_path  #(example:validation_64.json)
 OUTPUT_DIR="checkpoints/ltx2_distillation"
 # export CUDA_VISIBLE_DEVICES=4,5
@@ -98,13 +98,13 @@ dataset_args=(
 )
 
 # Validation arguments
-validation_args=(
-  --log_validation
-  --validation_dataset_file "$VALIDATION_DIR"
-  --validation_steps 200
-  --validation_sampling_steps "3"
-  --validation_guidance_scale "6.0" # not used for dmd inference
-)
+# validation_args=(
+#   --log_validation
+#   --validation_dataset_file "$VALIDATION_DIR"
+#   --validation_steps 200
+#   --validation_sampling_steps "3"
+#   --validation_guidance_scale "6.0" # not used for dmd inference
+# )
 
 # Optimizer arguments
 optimizer_args=(
@@ -156,6 +156,5 @@ torchrun \
     "${dataset_args[@]}" \
     "${training_args[@]}" \
     "${optimizer_args[@]}" \
-    "${validation_args[@]}" \
     "${miscellaneous_args[@]}" \
     "${dmd_args[@]}"
