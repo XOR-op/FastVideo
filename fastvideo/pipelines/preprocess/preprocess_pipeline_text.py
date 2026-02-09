@@ -105,7 +105,10 @@ class PreprocessPipeline_Text(BasePreprocessPipeline):
                     text_name = os.path.basename(text_path).split(".")[0]
 
                     # Convert tensors to numpy arrays
-                    text_embedding = prompt_embeds[idx].cpu().numpy()
+                    text_embedding = prompt_embeds[idx].cpu()
+                    if text_embedding.dtype == torch.bfloat16:
+                        text_embedding = text_embedding.float()
+                    text_embedding = text_embedding.numpy()
 
                     # Create record for Parquet dataset (text-only schema)
                     record = text_only_record_creator(

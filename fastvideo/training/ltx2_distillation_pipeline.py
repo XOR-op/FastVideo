@@ -22,6 +22,8 @@ class LTX2DistillationPipeline(DistillationPipeline):
 
     _required_config_modules = [
         "transformer",
+        "text_encoder",
+        "tokenizer",
         "vae",
         "audio_vae",
         "vocoder",
@@ -31,7 +33,8 @@ class LTX2DistillationPipeline(DistillationPipeline):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.modules["scheduler"] = None
+        self.modules["scheduler"] = torch.nn.Linear(
+            1, 1)  # dummy scheduler module to satisfy required modules
 
     def initialize_pipeline(self, fastvideo_args: FastVideoArgs):
         # self.modules["scheduler"] = FlowMatchEulerDiscreteScheduler(
@@ -103,7 +106,8 @@ class LTX2DistillationPipeline(DistillationPipeline):
             sp_size=training_args.sp_size,
             num_gpus=training_args.num_gpus,
             pin_cpu_memory=training_args.pin_cpu_memory,
-            dit_cpu_offload=True,
+            dit_cpu_offload=False,
+            dit_layerwise_offload=True,
         )
 
         self.validation_pipeline = validation_pipeline
@@ -128,4 +132,5 @@ if __name__ == "__main__":
     parser = FastVideoArgs.add_cli_args(parser)
     args = parser.parse_args()
     args.dit_cpu_offload = False
+    args.dit_layerwise_offload = False
     main(args)

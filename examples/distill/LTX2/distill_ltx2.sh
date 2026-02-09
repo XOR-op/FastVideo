@@ -51,7 +51,7 @@ NUM_GPUS=2
 MODEL_PATH="Davids048/LTX2-Base-Diffusers"
 REAL_SCORE_MODEL_PATH="Davids048/LTX2-Base-Diffusers"
 FAKE_SCORE_MODEL_PATH="Davids048/LTX2-Base-Diffusers"
-DATA_DIR=your_data_dir
+DATA_DIR=data/ltx2-data
 VALIDATION_DIR=your_validation_path  #(example:validation_64.json)
 OUTPUT_DIR="checkpoints/ltx2_distillation"
 # export CUDA_VISIBLE_DEVICES=4,5
@@ -59,7 +59,7 @@ OUTPUT_DIR="checkpoints/ltx2_distillation"
 
 # Training arguments
 training_args=(
-  --tracker_project_name LTX2_distillation
+#   --tracker_project_name LTX2_distillation
   --output_dir "$OUTPUT_DIR"
   --max_train_steps 4000
   --train_batch_size 1
