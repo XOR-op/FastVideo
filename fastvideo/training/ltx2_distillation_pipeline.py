@@ -19,6 +19,7 @@ from fastvideo.logger import init_logger
 from fastvideo.models.schedulers.scheduling_flow_match_euler_discrete import (
     FlowMatchEulerDiscreteScheduler, )
 from fastvideo.pipelines.basic.ltx2.ltx2_dmd_pipeline import LTX2DMDPipeline
+from fastvideo.pipelines.pipeline_batch_info import TrainingBatch
 from fastvideo.training.activation_checkpoint import apply_activation_checkpointing
 from fastvideo.training.distillation_pipeline import DistillationPipeline
 from fastvideo.training.trackers import (
@@ -50,9 +51,9 @@ class LTX2DistillationPipeline(DistillationPipeline):
     with_audio: bool = True
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
         self.real_score_transformer: torch.nn.Module = None  # type: ignore[assignment]
         self.fake_score_transformer: torch.nn.Module = None  # type: ignore[assignment]
+        super().__init__(*args, **kwargs)
 
     def initialize_training_pipeline(self, training_args: TrainingArgs):
         self._training_initialize_training_pipeline(training_args)
@@ -285,6 +286,11 @@ class LTX2DistillationPipeline(DistillationPipeline):
             )
         else:
             logger.info("Generator EMA disabled (ema_decay <= 0.0)")
+
+    def _normalize_dit_input(self,
+                             training_batch: TrainingBatch) -> TrainingBatch:
+        # just skip
+        return training_batch
 
     def initialize_pipeline(self, fastvideo_args: FastVideoArgs):
         # self.modules["scheduler"] = FlowMatchEulerDiscreteScheduler(
