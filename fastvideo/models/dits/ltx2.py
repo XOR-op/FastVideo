@@ -1016,6 +1016,7 @@ class LTXDistributedAttention(DistributedAttention):
         replicated_k: torch.Tensor | None = None,
         replicated_v: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
+        attn_mask_pad_len: int | None = None,
         ltx_freqs_cis: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Forward pass with LTX-2 style RoPE application.
@@ -1050,7 +1051,8 @@ class LTXDistributedAttention(DistributedAttention):
         # After all-to-all, each rank has the full sequence but only a subset of heads
         valid_seq_len = None
         if attention_mask is not None:
-            valid_seq_len = (attention_mask[0] == 1).sum().item()
+            # valid_seq_len = (attention_mask[0] == 1).sum().item()
+            valid_seq_len = attention_mask.shape[1] - attn_mask_pad_len # type: ignore[operator]
             qkv = qkv[:, :valid_seq_len, :, :]
 
         # Apply LTX-2 style RoPE after all-to-all (when we have full sequence)
@@ -1103,8 +1105,8 @@ class LTXDistributedAttention(DistributedAttention):
         output = self.attn_impl.postprocess_output(output, ctx_attn_metadata)
 
         if attention_mask is not None:
-            pad_len = (attention_mask[0] == 0).sum().item()
-            output = torch.nn.functional.pad(output, (0, 0, 0, 0, 0, pad_len))
+            assert attn_mask_pad_len is not None, "attn_mask_pad_len must be provided when attention_mask is used"
+            output = torch.nn.functional.pad(output, (0, 0, 0, 0, 0, attn_mask_pad_len))
 
         output = sequence_model_parallel_all_to_all_4D(output, scatter_dim=1, gather_dim=2)
 
@@ -1320,6 +1322,7 @@ class LTXDistributedSelfAttention(nn.Module):
         pe: tuple[torch.Tensor, torch.Tensor] | None = None,
         k_pe: tuple[torch.Tensor, torch.Tensor] | None = None,
         attention_mask: torch.Tensor | None = None,
+        attn_mask_pad_len: int | None = None,
     ) -> torch.Tensor:
         """Forward pass for distributed self-attention.
 
@@ -1352,6 +1355,7 @@ class LTXDistributedSelfAttention(nn.Module):
         out, _ = self.attn(
             q, k, v,
             attention_mask=attention_mask,
+            attn_mask_pad_len=attn_mask_pad_len,
             ltx_freqs_cis=pe,
         )
 
@@ -1512,6 +1516,8 @@ class BasicAVTransformerBlock(torch.nn.Module):
         audio: TransformerArgs | None,
         video_attention_mask: torch.Tensor | None = None,
         audio_attention_mask: torch.Tensor | None = None,
+        video_attn_mask_pad_len: int|None = None,
+        audio_attn_mask_pad_len: int|None = None,
     ) -> tuple[TransformerArgs | None, TransformerArgs | None]:
         """Forward pass for transformer block.
 
@@ -1536,7 +1542,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
             norm_vx = torch.nn.functional.rms_norm(vx, (vx.shape[-1],), eps=self.norm_eps) * (1 + vscale_msa) + vshift_msa
             # Self-attention: pass SP attention mask for distributed attention
             if self.use_distributed_attention:
-                vx = vx + self.attn1(norm_vx, pe=video.positional_embeddings, attention_mask=video_attention_mask) * vgate_msa
+                vx = vx + self.attn1(norm_vx, pe=video.positional_embeddings, attention_mask=video_attention_mask, attn_mask_pad_len=video_attn_mask_pad_len) * vgate_msa
             else:
                 vx = vx + self.attn1(norm_vx, pe=video.positional_embeddings) * vgate_msa
             # Text cross-attention: no SP mask needed (text is replicated, uses local attention)
@@ -1553,7 +1559,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
             norm_ax = torch.nn.functional.rms_norm(ax, (ax.shape[-1],), eps=self.norm_eps) * (1 + ascale_msa) + ashift_msa
             # Self-attention: pass SP attention mask for distributed attention
             if self.use_distributed_attention:
-                ax = ax + self.audio_attn1(norm_ax, pe=audio.positional_embeddings, attention_mask=audio_attention_mask) * agate_msa
+                ax = ax + self.audio_attn1(norm_ax, pe=audio.positional_embeddings, attention_mask=audio_attention_mask, attn_mask_pad_len=audio_attn_mask_pad_len) * agate_msa
             else:
                 ax = ax + self.audio_attn1(norm_ax, pe=audio.positional_embeddings) * agate_msa
             # Text cross-attention: no SP mask needed (text is replicated, uses local attention)
@@ -1980,6 +1986,8 @@ class LTXModel(torch.nn.Module):
         audio: TransformerArgs | None,
         video_attention_mask: torch.Tensor | None = None,
         audio_attention_mask: torch.Tensor | None = None,
+        video_attn_mask_pad_len: int | None = None,
+        audio_attn_mask_pad_len: int | None = None,
     ) -> tuple[TransformerArgs | None, TransformerArgs | None]:
         for block in self.transformer_blocks:
             video, audio = block(
@@ -1987,6 +1995,8 @@ class LTXModel(torch.nn.Module):
                 audio=audio,
                 video_attention_mask=video_attention_mask,
                 audio_attention_mask=audio_attention_mask,
+                video_attn_mask_pad_len=video_attn_mask_pad_len,
+                audio_attn_mask_pad_len=audio_attn_mask_pad_len,
             )
         return video, audio
 
@@ -2013,6 +2023,8 @@ class LTXModel(torch.nn.Module):
         audio: Modality | None,
         video_attention_mask: torch.Tensor | None = None,
         audio_attention_mask: torch.Tensor | None = None,
+        video_attn_mask_pad_len: int|None = None,
+        audio_attn_mask_pad_len: int|None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Forward pass through the LTX model.
 
@@ -2044,6 +2056,8 @@ class LTXModel(torch.nn.Module):
             audio_args,
             video_attention_mask=video_attention_mask,
             audio_attention_mask=audio_attention_mask,
+            video_attn_mask_pad_len=video_attn_mask_pad_len,
+            audio_attn_mask_pad_len=audio_attn_mask_pad_len,
         )
 
         vx = (
@@ -2361,6 +2375,8 @@ class LTX2Transformer3DModel(CachableDiT):
             audio=audio_modality,
             video_attention_mask=video_attention_mask,
             audio_attention_mask=audio_attention_mask,
+            video_attn_mask_pad_len=padded_seq_len - video_original_seq_len if video_attention_mask is not None else 0,
+            audio_attn_mask_pad_len=audio_padded_seq_len - audio_original_seq_len if audio_attention_mask is not None else 0,
         )
 
         # Denoised prediction
