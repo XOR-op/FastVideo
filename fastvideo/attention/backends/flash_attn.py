@@ -15,9 +15,11 @@ from fastvideo.logger import init_logger
 fa_ver = 2
 try:
     from flash_attn.cute import flash_attn_func
+    from flash_attn.cute import flash_attn_fwd
 
     fa_ver = 4
 except ImportError:
+    raise
     try:
         from flash_attn_interface import flash_attn_func as flash_attn_3_func
 
@@ -120,7 +122,7 @@ class FlashAttentionImpl(AttentionImpl):
             if isinstance(output, tuple):
                 output = output[0]
         else:
-            output = flash_attn_func(
+            output = flash_attn_fwd(
                 query,  # type: ignore[no-untyped-call]
                 key,
                 value,
