@@ -1516,8 +1516,8 @@ class BasicAVTransformerBlock(torch.nn.Module):
         audio: TransformerArgs | None,
         video_attention_mask: torch.Tensor | None = None,
         audio_attention_mask: torch.Tensor | None = None,
-        video_attn_mask_pad_len: int|None = None,
-        audio_attn_mask_pad_len: int|None = None,
+        video_attn_mask_pad_len: int | None = None,
+        audio_attn_mask_pad_len: int | None = None,
     ) -> tuple[TransformerArgs | None, TransformerArgs | None]:
         """Forward pass for transformer block.
 
@@ -2375,8 +2375,8 @@ class LTX2Transformer3DModel(CachableDiT):
             audio=audio_modality,
             video_attention_mask=video_attention_mask,
             audio_attention_mask=audio_attention_mask,
-            video_attn_mask_pad_len=padded_seq_len - video_original_seq_len if video_attention_mask is not None else 0,
-            audio_attn_mask_pad_len=audio_padded_seq_len - audio_original_seq_len if audio_attention_mask is not None else 0,
+            video_attn_mask_pad_len=padded_seq_len - video_original_seq_len if video_attention_mask is not None else None,
+            audio_attn_mask_pad_len=audio_padded_seq_len - audio_original_seq_len if audio_attention_mask is not None else None,
         )
 
         # Denoised prediction
