@@ -359,6 +359,17 @@ class GroupCoordinator:
         return self.device_communicator.all_to_all_4D(input_, scatter_dim,
                                                       gather_dim)
 
+    def all_to_all_4D_async(self,
+                            input_: torch.Tensor,
+                            scatter_dim: int = 2,
+                            gather_dim: int = 1):
+        if self.world_size == 1:
+            return input_
+        return self.device_communicator.all_to_all_4D(input_,
+                                                      scatter_dim,
+                                                      gather_dim,
+                                                      async_op=True)
+
     def broadcast(self, input_: torch.Tensor, src: int = 0):
         """Broadcast the input tensor.
         NOTE: `src` is the local rank of the source rank.

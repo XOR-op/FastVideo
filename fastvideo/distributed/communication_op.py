@@ -4,6 +4,7 @@
 import torch
 import torch.distributed
 
+from fastvideo.distributed.device_communicators.base_device_communicator import DistributedAutograd
 from fastvideo.distributed.parallel_state import (get_sp_group,
                                                   get_sp_parallel_rank,
                                                   get_sp_world_size,
@@ -37,6 +38,15 @@ def sequence_model_parallel_all_to_all_4D(input_: torch.Tensor,
                                           gather_dim: int = 1) -> torch.Tensor:
     """All-to-all communication of 4D tensors (e.g. QKV matrices) across sequence parallel group."""
     return get_sp_group().all_to_all_4D(input_, scatter_dim, gather_dim)
+
+
+def sequence_model_parallel_all_to_all_4D_async(
+        input_: torch.Tensor,
+        scatter_dim: int = 2,
+        gather_dim: int = 1
+) -> DistributedAutograd.AllToAll4D.PostProcessingHandle:
+    """All-to-all communication of 4D tensors (e.g. QKV matrices) across sequence parallel group."""
+    return get_sp_group().all_to_all_4D_async(input_, scatter_dim, gather_dim)
 
 
 def sequence_model_parallel_all_gather(input_: torch.Tensor,

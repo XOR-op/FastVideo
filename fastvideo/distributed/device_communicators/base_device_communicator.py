@@ -11,7 +11,7 @@ from torch.distributed import ProcessGroup, ReduceOp
 
 class DistributedAutograd:
     """Collection of autograd functions for distributed operations.
-    
+
     This class provides custom autograd functions for distributed operations like all_reduce,
     all_gather, and all_to_all. Each operation is implemented as a static inner class with
     proper forward and backward implementations.
@@ -19,16 +19,18 @@ class DistributedAutograd:
 
     class AllReduce(torch.autograd.Function):
         """Differentiable all_reduce operation.
-        
+
         The gradient of all_reduce is another all_reduce operation since the operation
         combines values from all ranks equally.
         """
 
         @staticmethod
-        def forward(ctx: Any,
-                    group: ProcessGroup,
-                    input_: Tensor,
-                    op: dist.ReduceOp | None = None) -> Tensor:
+        def forward(
+            ctx: Any,
+            group: ProcessGroup,
+            input_: Tensor,
+            op: dist.ReduceOp | None = None,
+        ) -> Tensor:
             ctx.group = group
             ctx.op = op
             output = input_.clone()
@@ -44,14 +46,19 @@ class DistributedAutograd:
 
     class AllGather(torch.autograd.Function):
         """Differentiable all_gather operation.
-        
+
         The operation gathers tensors from all ranks and concatenates them along a specified dimension.
         The backward pass uses reduce_scatter to efficiently distribute gradients back to source ranks.
         """
 
         @staticmethod
-        def forward(ctx: Any, group: ProcessGroup, input_: Tensor,
-                    world_size: int, dim: int) -> Tensor:
+        def forward(
+            ctx: Any,
+            group: ProcessGroup,
+            input_: Tensor,
+            world_size: int,
+            dim: int,
+        ) -> Tensor:
             ctx.group = group
             ctx.world_size = world_size
             ctx.dim = dim
@@ -86,9 +93,11 @@ class DistributedAutograd:
             grad_chunks = grad_chunks.movedim(ctx.dim, 0)
 
             # Each rank only needs its corresponding gradient
-            grad_input = torch.empty(ctx.input_shape,
-                                     dtype=grad_output.dtype,
-                                     device=grad_output.device)
+            grad_input = torch.empty(
+                ctx.input_shape,
+                dtype=grad_output.dtype,
+                device=grad_output.device,
+            )
             dist.reduce_scatter_tensor(grad_input,
                                        grad_chunks.contiguous(),
                                        group=ctx.group)
@@ -97,29 +106,78 @@ class DistributedAutograd:
 
     class AllToAll4D(torch.autograd.Function):
         """Differentiable all_to_all operation specialized for 4D tensors.
-        
+
         This operation is particularly useful for attention operations where we need to
         redistribute data across ranks for efficient parallel processing.
-        
+
         The operation supports two modes:
         1. scatter_dim=2, gather_dim=1: Used for redistributing attention heads
         2. scatter_dim=1, gather_dim=2: Used for redistributing sequence dimensions
         """
 
+        class PostProcessingHandle:
+
+            def __init__(
+                self,
+                handle: dist.Work,
+                tensor: torch.Tensor,
+                scatter_dim: int,
+                gather_dim: int,
+                shard_hn: int = 0,
+            ):
+                self.handle = handle
+                self.tensor = tensor
+                self.scatter_dim = scatter_dim
+                self.gather_dim = gather_dim
+                self.shard_hn = shard_hn
+
+            def finalize(self) -> torch.Tensor:
+                if self.tensor is None:
+                    raise RuntimeError("Already finalized")
+                self.handle.wait()
+                output = self.tensor
+                self.tensor = None
+                if self.scatter_dim == 2 and self.gather_dim == 1:
+                    output = torch.cat(output.split(self.shard_hn),
+                                       dim=1)  # sharded hn, seqlen, bs, hd
+                    output = output.transpose(
+                        0, 2).contiguous()  # bs, seqlen, sharded_hn, hd
+                    return output
+                elif self.scatter_dim == 1 and self.gather_dim == 2:
+                    output = output.transpose(
+                        0, 2).contiguous()  # bs, seqlen, sharded_hn, hd
+
+                    return output
+                else:
+                    raise RuntimeError(
+                        f"Invalid scatter_dim={self.scatter_dim}, gather_dim={self.gather_dim}. "
+                        f"Only (scatter_dim=2, gather_dim=1) and (scatter_dim=1, gather_dim=2) are supported."
+                    )
+
         @staticmethod
-        def forward(ctx: Any, group: ProcessGroup, input_: Tensor,
-                    world_size: int, scatter_dim: int,
-                    gather_dim: int) -> Tensor:
+        def forward(
+            ctx: Any,
+            group: ProcessGroup,
+            input_: Tensor,
+            world_size: int,
+            scatter_dim: int,
+            gather_dim: int,
+            async_op: bool = False,
+        ) -> Tensor:
             ctx.group = group
             ctx.world_size = world_size
             ctx.scatter_dim = scatter_dim
             ctx.gather_dim = gather_dim
 
+            assert not torch.is_grad_enabled(
+            ) if async_op else True, "Async operation is only supported in inference mode"
+
             if world_size == 1:
                 return input_
 
-            assert input_.dim(
-            ) == 4, f"input must be 4D tensor, got {input_.dim()} and shape {input_.shape}"
+            assert input_.dim() == 4, (
+                f"input must be 4D tensor, got {input_.dim()} and shape {input_.shape}"
+            )
 
             if scatter_dim == 2 and gather_dim == 1:
                 bs, shard_seqlen, hn, hd = input_.shape
@@ -130,9 +188,12 @@ class DistributedAutograd:
                     0, 2).contiguous()  # hn, shard_seqlen, bs, hd
                 output = torch.empty_like(input_)
 
-                dist.all_to_all_single(output, input_,
-                                       group=group)  # hn, shard_seqlen, bs, hd
-
+                maybe_handle = dist.all_to_all_single(
+                    output, input_, group=group,
+                    async_op=async_op)  # hn, shard_seqlen, bs, hd
+                if maybe_handle is not None:
+                    return DistributedAutograd.AllToAll4D.PostProcessingHandle(
+                        maybe_handle, output, scatter_dim, gather_dim, shard_hn)
                 output = torch.cat(output.split(shard_hn),
                                    dim=1)  # sharded hn, seqlen, bs, hd
 
@@ -148,15 +209,19 @@ class DistributedAutograd:
                 input_ = input_.transpose(
                     0, 2).contiguous()  # shard_hn, seqlen, bs, hd
 
-                input_ = input_.reshape(shard_hn, world_size, shard_seqlen, bs,
-                                        hd).transpose(0, 1).reshape(
-                                            shard_hn * world_size, shard_seqlen,
-                                            bs, hd).contiguous()
+                input_ = (input_.reshape(shard_hn, world_size, shard_seqlen, bs,
+                                         hd).transpose(0, 1).reshape(
+                                             shard_hn * world_size,
+                                             shard_seqlen, bs, hd).contiguous())
 
                 output = torch.empty_like(input_)
 
-                dist.all_to_all_single(output, input_, group=group)
-
+                maybe_handle = dist.all_to_all_single(
+                    output, input_, group=group,
+                    async_op=async_op)  # hn, shard_seqlen, bs, hd
+                if maybe_handle is not None:
+                    return DistributedAutograd.AllToAll4D.PostProcessingHandle(
+                        maybe_handle, output, scatter_dim, gather_dim)
                 output = output.transpose(
                     0, 2).contiguous()  # bs, seqlen, sharded_hn, hd
 
@@ -176,8 +241,12 @@ class DistributedAutograd:
 
             # For backward pass, we swap scatter_dim and gather_dim
             output = DistributedAutograd.AllToAll4D.apply(
-                ctx.group, grad_output, ctx.world_size, ctx.gather_dim,
-                ctx.scatter_dim)
+                ctx.group,
+                grad_output,
+                ctx.world_size,
+                ctx.gather_dim,
+                ctx.scatter_dim,
+            )
             return None, output, None, None, None
 
 
@@ -189,11 +258,13 @@ class DeviceCommunicatorBase:
     communication backend), the `device_group` will also be given.
     """
 
-    def __init__(self,
-                 cpu_group: ProcessGroup,
-                 device: torch.device | None = None,
-                 device_group: ProcessGroup | None = None,
-                 unique_name: str = ""):
+    def __init__(
+        self,
+        cpu_group: ProcessGroup,
+        device: torch.device | None = None,
+        device_group: ProcessGroup | None = None,
+        unique_name: str = "",
+    ):
         self.device = device or torch.device("cpu")
         self.cpu_group = cpu_group
         self.device_group = device_group
@@ -220,14 +291,18 @@ class DeviceCommunicatorBase:
         return DistributedAutograd.AllGather.apply(self.device_group, input_,
                                                    self.world_size, dim)
 
-    def all_to_all_4D(self,
-                      input_: torch.Tensor,
-                      scatter_dim: int = 2,
-                      gather_dim: int = 1) -> torch.Tensor:
+    def all_to_all_4D(
+        self,
+        input_: torch.Tensor,
+        scatter_dim: int = 2,
+        gather_dim: int = 1,
+        async_op: bool = False
+    ) -> torch.Tensor | DistributedAutograd.AllToAll4D.PostProcessingHandle:
         """Performs a 4D all-to-all operation with gradient support."""
         return DistributedAutograd.AllToAll4D.apply(self.device_group, input_,
                                                     self.world_size,
-                                                    scatter_dim, gather_dim)
+                                                    scatter_dim, gather_dim,
+                                                    async_op)
 
     def gather(self,
                input_: torch.Tensor,

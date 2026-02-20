@@ -24,6 +24,7 @@ from fastvideo.distributed.communication_op import (
     sequence_model_parallel_all_gather,
     sequence_model_parallel_all_gather_with_unpad,
     sequence_model_parallel_all_to_all_4D,
+    sequence_model_parallel_all_to_all_4D_async,
     sequence_model_parallel_shard,
 )
 from fastvideo.distributed.parallel_state import get_sp_parallel_rank, get_sp_world_size
@@ -1174,9 +1175,7 @@ class LTXDistributedAttention(DistributedAttention):
     @torch.compiler.disable
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        qkv: torch.Tensor,
         replicated_q: torch.Tensor | None = None,
         replicated_k: torch.Tensor | None = None,
         replicated_v: torch.Tensor | None = None,
@@ -1187,9 +1186,7 @@ class LTXDistributedAttention(DistributedAttention):
         """Forward pass with LTX-2 style RoPE application.
 
         Args:
-            q: Query tensor [batch_size, seq_len, num_heads, head_dim]
-            k: Key tensor [batch_size, seq_len, num_heads, head_dim]
-            v: Value tensor [batch_size, seq_len, num_heads, head_dim]
+            qkv: QKV after all2all [3*batch_size, seq_len, num_heads, head_dim]
             replicated_q: Replicated query tensor for text tokens
             replicated_k: Replicated key tensor
             replicated_v: Replicated value tensor
@@ -1199,24 +1196,22 @@ class LTXDistributedAttention(DistributedAttention):
         Returns:
             Tuple of output tensor and optional replicated output
         """
-        assert q.dim() == 4 and k.dim() == 4 and v.dim() == 4, "Expected 4D tensors"
-        batch_size, seq_len, num_heads, head_dim = q.shape
+        assert qkv.dim() == 4, "Expected 4D tensor"
         local_rank = get_sp_parallel_rank()
         world_size = get_sp_world_size()
+
+        batch_size = qkv.shape[0] // 3
+        seq_len, num_heads, head_dim = qkv.shape[1], qkv.shape[2], qkv.shape[3]
+        # recover original seq_len and num_heads before all-to-all
+        seq_len //= world_size
+        num_heads *= world_size
 
         forward_context: ForwardContext = get_forward_context()
         ctx_attn_metadata = forward_context.attn_metadata
 
-        # Stack QKV
-        qkv = torch.cat([q, k, v], dim=0)  # [3*batch, seq_len, num_heads, head_dim]
-
-        # Redistribute heads across sequence dimension
-        qkv = sequence_model_parallel_all_to_all_4D(qkv, scatter_dim=2, gather_dim=1)
-
         # After all-to-all, each rank has the full sequence but only a subset of heads
         valid_seq_len = None
         if attention_mask is not None:
-            # valid_seq_len = (attention_mask[0] == 1).sum().item()
             valid_seq_len = attention_mask.shape[1] - attn_mask_pad_len # type: ignore[operator]
             qkv = qkv[:, :valid_seq_len, :, :]
 
@@ -1290,6 +1285,7 @@ class LTXDistributedSelfAttention(nn.Module):
         norm_eps: float,
         rope_type: LTXRopeType,
         supported_attention_backends: tuple[AttentionBackendEnum, ...],
+        comm_stream: torch.cuda.Stream,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -1299,6 +1295,7 @@ class LTXDistributedSelfAttention(nn.Module):
         self.heads = heads
         self.dim_head = dim_head
         self.rope_type = rope_type
+        self.comm_stream = comm_stream
 
         self.q_norm = torch.nn.RMSNorm(inner_dim, eps=norm_eps)
         self.k_norm = torch.nn.RMSNorm(inner_dim, eps=norm_eps)
@@ -1335,26 +1332,51 @@ class LTXDistributedSelfAttention(nn.Module):
             k_pe: Rotary position embeddings for K (cos, sin), or None to use pe
             attention_mask: Attention mask for padding [B, padded_seq_len]
         """
-        q = self.to_q(x)
         context = x if context is None else context
-        k = self.to_k(context)
-        v = self.to_v(context)
+        is_inference = not torch.is_grad_enabled()
 
+        # overlapping QKV proj and All-to-all
+        q = self.to_q(x)
         q = self.q_norm(q)
-        k = self.k_norm(k)
-
-        # RoPE is applied inside LTXDistributedAttention AFTER the all-to-all,
-        # when each rank has the full sequence (but subset of heads).
         b, q_len, _ = q.shape
-        k_len = k.shape[1]
         q = q.view(b, q_len, self.heads, self.dim_head)
+
+        if is_inference:
+            q_handle = sequence_model_parallel_all_to_all_4D_async(q, scatter_dim=2, gather_dim=1)
+        else:
+            q = sequence_model_parallel_all_to_all_4D(q, scatter_dim=2, gather_dim=1)
+
+
+        # RoPE is appliedAFTER the all-to-all,
+        # when each rank has the full sequence (but subset of heads).
+        k = self.to_k(context)
+        k = self.k_norm(k)
+        k_len = k.shape[1]
         k = k.view(b, k_len, self.heads, self.dim_head)
+        if is_inference:
+            k_handle = sequence_model_parallel_all_to_all_4D_async(k, scatter_dim=2, gather_dim=1)
+        else:
+            k = sequence_model_parallel_all_to_all_4D(k, scatter_dim=2, gather_dim=1)
+
+        v = self.to_v(context)
         v = v.view(b, k_len, self.heads, self.dim_head)
+        if is_inference:
+            v_handle = sequence_model_parallel_all_to_all_4D_async(v, scatter_dim=2, gather_dim=1)
+        else:
+            v = sequence_model_parallel_all_to_all_4D(v, scatter_dim=2, gather_dim=1)
+            
+        if is_inference:
+            q = q_handle.finalize()
+            k = k_handle.finalize()
+            v = v_handle.finalize()
+
+        # Stack QKV
+        qkv = torch.cat([q, k, v], dim=0)  # [3*batch, seq_len, num_heads, head_dim]
 
         # Pass full RoPE to distributed attention - it will apply after all-to-all
         # and slice to this rank's heads
         out, _ = self.attn(
-            q, k, v,
+            qkv,
             attention_mask=attention_mask,
             attn_mask_pad_len=attn_mask_pad_len,
             ltx_freqs_cis=pe,
@@ -1370,6 +1392,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
     def __init__(
         self,
         idx: int,
+        comm_stream: torch.cuda.Stream,
         video: TransformerConfig | None = None,
         audio: TransformerConfig | None = None,
         rope_type: LTXRopeType = LTXRopeType.INTERLEAVED,
@@ -1397,6 +1420,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
                 norm_eps=norm_eps,
                 rope_type=rope_type,
                 supported_attention_backends=(AttentionBackendEnum.FLASH_ATTN, AttentionBackendEnum.TORCH_SDPA),
+                comm_stream=comm_stream,
                 prefix=f"{prefix}.blocks.{idx}.attn1" if use_distributed_attention else "",
             ) if use_distributed_attention else LTXSelfAttention(
                 query_dim=video.dim,
@@ -1430,6 +1454,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
                 norm_eps=norm_eps,
                 rope_type=rope_type,
                 supported_attention_backends=(AttentionBackendEnum.FLASH_ATTN, AttentionBackendEnum.TORCH_SDPA),
+                comm_stream=comm_stream,
                 prefix=f"{prefix}.blocks.{idx}.audio_attn1" if use_distributed_attention else "",
             ) if use_distributed_attention else LTXSelfAttention(
                 query_dim=audio.dim,
@@ -1769,6 +1794,7 @@ class LTXModel(torch.nn.Module):
         self.timestep_scale_multiplier = timestep_scale_multiplier
         self.positional_embedding_theta = positional_embedding_theta
         self.model_type = model_type
+        self.comm_stream = torch.cuda.Stream() 
         cross_pe_max_pos = None
 
         if model_type.is_video_enabled():
@@ -1970,6 +1996,7 @@ class LTXModel(torch.nn.Module):
             [
                 BasicAVTransformerBlock(
                     idx=idx,
+                    comm_stream=self.comm_stream,
                     video=video_config,
                     audio=audio_config,
                     rope_type=self.rope_type,
