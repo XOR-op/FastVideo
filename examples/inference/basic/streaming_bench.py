@@ -1,5 +1,9 @@
+import os
 from fastvideo.entrypoints.streaming_generator import StreamingVideoGenerator
-from fastvideo.models.dits.matrixgame.utils import get_current_action_async, expand_action_to_frames
+from fastvideo.models.dits.matrixgame.utils import (
+    get_current_action_async,
+    expand_action_to_frames,
+)
 
 import torch
 import asyncio
@@ -35,6 +39,10 @@ VARIANT_CONFIG = {
 
 
 OUTPUT_PATH = "video_samples_matrixgame2"
+
+os.environ["FASTVIDEO_STAGE_LOGGING"] = "1"
+
+
 async def main():
     # FastVideo will automatically use the optimal default arguments for the
     # model.
@@ -46,20 +54,22 @@ async def main():
         config["model_path"],
         # FastVideo will automatically handle distributed setup
         num_gpus=1,
-        use_fsdp_inference=False, # set to True if GPU is out of memory
-        dit_cpu_offload=True, # DiT need to be offloaded for MoE
+        dit_layerwise_offload=False,
+        use_fsdp_inference=False,  # set to True if GPU is out of memory
+        dit_cpu_offload=True,  # DiT need to be offloaded for MoE
         vae_cpu_offload=False,
-        text_encoder_cpu_offload=True,
+        text_encoder_cpu_offload=False,
         # Set pin_cpu_memory to false if CPU RAM is limited and there're no frequent CPU-GPU transfer
         pin_cpu_memory=True,
-        # image_encoder_cpu_offload=False,
+        image_encoder_cpu_offload=False,
+        enable_torch_compile=True,
     )
 
     max_blocks = 50
-    num_frames = 597    
+    num_frames = 597
     actions = {
         "keyboard": torch.zeros((num_frames, config["keyboard_dim"])),
-        "mouse": torch.zeros((num_frames, 2))
+        "mouse": torch.zeros((num_frames, 2)),
     }
     grid_sizes = torch.tensor([150, 44, 80])
     mode = config["mode"]
@@ -81,13 +91,14 @@ async def main():
 
     for block_id in range(max_blocks):
         print(f"\n=== Block {block_id + 1}/{max_blocks} ===")
-        
-        action = await get_current_action_async(mode)
+
+        # action = await get_current_action_async(mode)
+        action = {"keyboard": torch.tensor([1, 0, 0, 0])}
         keyboard_cond, mouse_cond = expand_action_to_frames(action, 12)
         await generator.step_async(keyboard_cond, mouse_cond)
-        
-        if (await asyncio.to_thread(input, "\nContinue? (y/n): ")).lower() == 'n':
-            break
+
+        # if (await asyncio.to_thread(input, "\nContinue? (y/n): ")).lower() == 'n':
+        #     break
 
     # Save final video
     generator.finalize()

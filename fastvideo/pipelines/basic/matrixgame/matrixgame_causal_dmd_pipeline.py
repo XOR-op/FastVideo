@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Matrix-Game causal DMD pipeline implementation."""
 
+import time
 from fastvideo.fastvideo_args import FastVideoArgs
 import torch
 from fastvideo.logger import init_logger
@@ -105,6 +106,7 @@ class MatrixGameCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
         end_idx = ctx.start_index
 
         # Decode only the new generated block
+        ts_start = time.perf_counter()
         if end_idx > start_idx:
             current_latents = batch.latents[:, :, start_idx:end_idx, :, :]
             args = ctx.fastvideo_args
@@ -117,6 +119,10 @@ class MatrixGameCausalDMDPipeline(LoRAPipeline, ComposedPipelineBase):
             batch.output = decoded_frames
         else:
             batch.output = None
+        torch.cuda.synchronize()
+
+        ts_end = time.perf_counter()
+        logger.info(f"Decoded frames {start_idx} to {end_idx}, time taken: {(ts_end - ts_start) * 1000:.1f} ms")
 
         return batch
 
